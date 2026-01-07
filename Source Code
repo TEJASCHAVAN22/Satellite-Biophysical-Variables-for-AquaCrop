@@ -1,0 +1,204 @@
+// =====================================================
+// FINAL AquaCrop Assimilation Output
+// Silage Maize | Satellite Assimilation | WCA Ready
+// =====================================================
+
+// -------------------------------
+// 1. Area of Interest
+// -------------------------------
+var aoi = ee.FeatureCollection('FAO/GAUL/2015/level2')
+  .filter(ee.Filter.eq('ADM2_NAME', 'Sangli'));   // change if required
+
+Map.centerObject(aoi, 8);
+
+// -------------------------------
+// 2. Crop Season
+// -------------------------------
+var startDate = '2023-06-01';
+var endDate   = '2023-10-31';
+
+// =====================================================
+// 3. Sentinel-2 NDVI & Canopy Cover
+// =====================================================
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(aoi)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(function(img){
+    var ndvi = img.normalizedDifference(['B8','B4']).rename('NDVI');
+    var cc = ndvi.expression(
+      '(ndvi - 0.2) / (0.8 - 0.2)', {ndvi: ndvi}
+    ).rename('CC').clamp(0,1);
+    return img.addBands([ndvi, cc]);
+  });
+
+var NDVI = s2.select('NDVI').mean().clip(aoi);
+var CC   = s2.select('CC').mean().clip(aoi);
+
+// =====================================================
+// 4. MODIS LAI
+// =====================================================
+var LAI = ee.ImageCollection('MODIS/061/MOD15A2H')
+  .filterDate(startDate, endDate)
+  .select('Lai_500m')
+  .mean()
+  .multiply(0.1)
+  .rename('LAI')
+  .clip(aoi);
+
+// =====================================================
+// 5. MODIS Evapotranspiration
+// =====================================================
+var ET = ee.ImageCollection('MODIS/061/MOD16A2')
+  .filterDate(startDate, endDate)
+  .select('ET')
+  .sum()
+  .divide(100)
+  .rename('ET')
+  .clip(aoi);
+
+// =====================================================
+// 6. CHIRPS Rainfall
+// =====================================================
+var Rain = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(startDate, endDate)
+  .sum()
+  .divide(100)
+  .rename('Rainfall')
+  .clip(aoi);
+
+// =====================================================
+// 7. STACK (FOR EXPORT / ANALYSIS)
+// =====================================================
+var FinalStack = NDVI
+  .addBands(CC)
+  .addBands(LAI)
+  .addBands(ET)
+  .addBands(Rain);
+
+print('Biophysical Variable Stack', FinalStack);
+
+// =====================================================
+// 8. NORMALIZATION (0–1)
+// =====================================================
+var NDVI_n = NDVI.unitScale(0, 1);
+var CC_n   = CC.unitScale(0, 1);
+var LAI_n  = LAI.unitScale(0, 6);
+var ET_n   = ET.unitScale(0, 500);
+var R_n    = Rain.unitScale(0, 1200);
+
+// =====================================================
+// 9. FINAL AQUACROP ASSIMILATION INDEX
+// =====================================================
+var AquaCropIndex = NDVI_n.multiply(0.25)
+  .add(CC_n.multiply(0.20))
+  .add(LAI_n.multiply(0.25))
+  .add(ET_n.multiply(0.15))
+  .add(R_n.multiply(0.15))
+  .rename('AquaCrop_Index')
+  .clip(aoi);
+
+print('Final AquaCrop Assimilation Index', AquaCropIndex);
+
+// =====================================================
+// 10. VISUALIZATION
+// =====================================================
+Map.addLayer(NDVI, {min:0, max:1, palette:['brown','yellow','green']}, 'NDVI');
+Map.addLayer(CC,   {min:0, max:1, palette:['white','green']}, 'Canopy Cover');
+Map.addLayer(LAI,  {min:0, max:6, palette:['yellow','darkgreen']}, 'LAI');
+Map.addLayer(ET,   {min:0, max:500, palette:['white','blue']}, 'ET (mm)');
+Map.addLayer(Rain, {min:0, max:1200, palette:['white','cyan','blue']}, 'Rainfall');
+
+var compositeVis = {
+  min: 0,
+  max: 1,
+  palette: [
+    '#8c510a', // very low
+    '#d8b365', // low
+    '#f6e8c3', // moderate
+    '#c7eae5', // good
+    '#5ab4ac', // high
+    '#01665e'  // very high
+  ]
+};
+
+Map.addLayer(
+  AquaCropIndex,
+  compositeVis,
+  'Final AquaCrop Assimilation Output'
+);
+
+// =====================================================
+// 11. ZONAL MEAN (AquaCrop INPUT)
+// =====================================================
+var stats = AquaCropIndex.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: aoi,
+  scale: 500,
+  maxPixels: 1e13
+});
+
+print('Final AquaCrop Index (Mean)', stats);
+
+//--------------------------------------------------------
+//--------------------------------------------------------
+// =====================================================
+// 12. LEGEND – AquaCrop Assimilation Output
+// =====================================================
+
+// Create legend panel
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+// Legend title
+var legendTitle = ui.Label({
+  value: 'Final AquaCrop Assimilation',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '14px',
+    margin: '0 0 8px 0'
+  }
+});
+legend.add(legendTitle);
+
+// Legend color & label list
+var legendItems = [
+  {color: '#8c510a', label: 'Very Low'},
+  {color: '#d8b365', label: 'Low'},
+  {color: '#f6e8c3', label: 'Moderate'},
+  {color: '#c7eae5', label: 'Good'},
+  {color: '#5ab4ac', label: 'High'},
+  {color: '#01665e', label: 'Very High'}
+];
+
+// Create legend rows
+legendItems.forEach(function(item) {
+  var row = ui.Panel({
+    layout: ui.Panel.Layout.Flow('horizontal'),
+    style: {margin: '0 0 4px 0'}
+  });
+
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: item.color,
+      padding: '8px',
+      margin: '0 8px 0 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: item.label,
+    style: {fontSize: '12px'}
+  });
+
+  row.add(colorBox);
+  row.add(description);
+  legend.add(row);
+});
+
+// Add legend to map
+Map.add(legend);
